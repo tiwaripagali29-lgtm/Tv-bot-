@@ -2,17 +2,19 @@ import os
 import re
 import asyncio
 
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton
 )
-from pyrogram import idle
-from pytgcalls import PyTgCalls
 
-# =========================
-# CONFIGURATION
-# =========================
+from pytgcalls import PyTgCalls
+from pytgcalls.types import MediaStream
+
+
+# ==================================
+# CONFIG
+# ==================================
 
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
@@ -21,19 +23,20 @@ SESSION_STRING = os.environ["SESSION_STRING"]
 
 M3U_FILE = "channels.m3u"
 
-# =========================
-# TELEGRAM CLIENTS
-# =========================
+
+# ==================================
+# CLIENTS
+# ==================================
 
 bot = Client(
-    "ansh_live_bot",
+    "ANSH_LIVE_BOT",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN
 )
 
 user = Client(
-    "ansh_stream_user",
+    "ANSH_LIVE_USER",
     api_id=API_ID,
     api_hash=API_HASH,
     session_string=SESSION_STRING
@@ -41,9 +44,10 @@ user = Client(
 
 calls = PyTgCalls(user)
 
-# =========================
-# M3U READER
-# =========================
+
+# ==================================
+# M3U LOADER
+# ==================================
 
 def load_channels():
 
@@ -63,27 +67,27 @@ def load_channels():
 
                 match = re.search(r",(.+)$", line)
 
-                if match:
-                    name = match.group(1).strip()
+                name = match.group(1).strip() if match else None
 
-            elif line.startswith("http") and name:
+            elif line.startswith(("http://", "https://")):
 
-                channels.append({
-                    "name": name,
-                    "url": line
-                })
+                if name:
+                    channels.append({
+                        "name": name,
+                        "url": line
+                    })
 
                 name = None
 
     return channels
 
 
-# =========================
-# START COMMAND
-# =========================
+# ==================================
+# START
+# ==================================
 
 @bot.on_message(filters.command("start"))
-async def start(client, message):
+async def start_command(client, message):
 
     keyboard = InlineKeyboardMarkup([
         [
@@ -101,36 +105,35 @@ async def start(client, message):
     ])
 
     await message.reply_text(
-        "📺 ANSH LIVE TV BOT\n\n"
-        "Welcome!\n"
-        "Watch authorized live streams.\n\n"
-        "Select an option below.",
+        "📺 ANSH LIVE TV\n\n"
+        "Welcome to Live TV Bot!\n\n"
+        "Select your option:",
         reply_markup=keyboard
     )
 
 
-# =========================
+# ==================================
 # CHANNEL LIST
-# =========================
+# ==================================
 
-async def show_channels(message):
+async def send_channels(message):
 
     channels = load_channels()
 
     if not channels:
         await message.reply_text(
-            "❌ No authorized M3U channels found!"
+            "❌ No channels found in channels.m3u"
         )
         return
 
     buttons = []
 
-    for i, channel in enumerate(channels):
+    for index, channel in enumerate(channels):
 
         buttons.append([
             InlineKeyboardButton(
                 f"📺 {channel['name']}",
-                callback_data=f"play:{i}"
+                callback_data=f"play_{index}"
             )
         ])
 
@@ -142,52 +145,13 @@ async def show_channels(message):
 
 @bot.on_message(filters.command("channels"))
 async def channels_command(client, message):
-    await show_channels(message)
+
+    await send_channels(message)
 
 
-# =========================
-# BUTTON HANDLER
-# =========================
-
-@bot.on_callback_query()
-async def button_handler(client, query):
-
-    if query.data == "channels":
-
-        await show_channels(query.message)
-
-    elif query.data == "help":
-
-        await query.message.reply_text(
-            "/start - Start bot\n"
-            "/channels - Channel list\n"
-            "/play CHANNEL NAME - Play channel\n"
-            "/stop - Stop streaming"
-        )
-
-    elif query.data.startswith("play:"):
-
-        index = int(query.data.split(":")[1])
-
-        channels_list = load_channels()
-
-        if index >= len(channels_list):
-            await query.answer("Channel not found!", show_alert=True)
-            return
-
-        channel = channels_list[index]
-
-        await play_channel(
-            query.message.chat.id,
-            channel
-        )
-
-        await query.answer("Channel selected!")
-
-
-# =========================
-# PLAY FUNCTION
-# =========================
+# ==================================
+# PLAY CHANNEL
+# ==================================
 
 async def play_channel(chat_id, channel):
 
@@ -195,7 +159,7 @@ async def play_channel(chat_id, channel):
 
         await calls.play(
             chat_id,
-            channel["url"]
+            MediaStream(channel["url"])
         )
 
         await bot.send_message(
@@ -208,13 +172,63 @@ async def play_channel(chat_id, channel):
 
         await bot.send_message(
             chat_id,
-            f"❌ Stream error:\n{str(error)[:300]}"
+            "❌ STREAM ERROR\n\n"
+            + str(error)[:500]
         )
 
 
-# =========================
+# ==================================
+# CALLBACK BUTTONS
+# ==================================
+
+@bot.on_callback_query()
+async def callback_handler(client, query):
+
+    data = query.data
+
+    if data == "channels":
+
+        await query.answer()
+        await send_channels(query.message)
+
+    elif data == "help":
+
+        await query.answer()
+
+        await query.message.reply_text(
+            "/start - Start bot\n"
+            "/channels - All channels\n"
+            "/play CHANNEL NAME - Play channel\n"
+            "/stop - Stop stream"
+        )
+
+    elif data.startswith("play_"):
+
+        await query.answer()
+
+        try:
+
+            index = int(data.replace("play_", ""))
+
+            channels = load_channels()
+
+            channel = channels[index]
+
+            await play_channel(
+                query.message.chat.id,
+                channel
+            )
+
+        except (ValueError, IndexError):
+
+            await query.message.reply_text(
+                "❌ Channel not found!"
+            )
+
+
+# ==================================
 # PLAY COMMAND
-# =========================
+# ==================================
 
 @bot.on_message(filters.command("play"))
 async def play_command(client, message):
@@ -222,17 +236,19 @@ async def play_command(client, message):
     if len(message.command) < 2:
 
         await message.reply_text(
-            "Usage:\n/play Sony SAB HD"
+            "Usage:\n/play DD National"
         )
         return
 
-    search_name = " ".join(message.command[1:]).lower()
+    search = " ".join(
+        message.command[1:]
+    ).lower()
 
-    channels_list = load_channels()
+    channels = load_channels()
 
-    for channel in channels_list:
+    for channel in channels:
 
-        if search_name in channel["name"].lower():
+        if search in channel["name"].lower():
 
             await play_channel(
                 message.chat.id,
@@ -246,41 +262,49 @@ async def play_command(client, message):
     )
 
 
-# =========================
+# ==================================
 # STOP COMMAND
-# =========================
+# ==================================
 
 @bot.on_message(filters.command("stop"))
 async def stop_command(client, message):
 
     try:
 
-        await calls.leave_call(message.chat.id)
-
-        await message.reply_text(
-            "⏹️ LIVE STREAM STOPPED!"
+        await calls.leave_call(
+            message.chat.id
         )
 
-    except Exception:
+        await message.reply_text(
+            "⏹️ STREAM STOPPED!"
+        )
+
+    except Exception as error:
 
         await message.reply_text(
-            "❌ No active stream found."
+            f"❌ STOP ERROR: {str(error)[:200]}"
         )
 
 
-# =========================
-# RUN BOT
-# =========================
+# ==================================
+# MAIN
+# ==================================
 
 async def main():
 
     print("Starting ANSH LIVE TV...")
 
     await user.start()
+
+    print("User session connected!")
+
     await calls.start()
+
+    print("PyTgCalls started!")
+
     await bot.start()
 
-    print("ANSH LIVE TV BOT STARTED!")
+    print("ANSH LIVE TV BOT ONLINE!")
 
     await idle()
 
@@ -290,4 +314,5 @@ async def main():
 
 
 if __name__ == "__main__":
+
     asyncio.run(main())
