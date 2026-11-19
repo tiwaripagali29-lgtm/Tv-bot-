@@ -9,7 +9,9 @@ RUN apt-get update && apt-get install -y \
 
 COPY requirements.txt .
 
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip uninstall -y pyrogram pyrofork hydrogram || true
+
+RUN pip install --no-cache-dir kurigram py-tgcalls==2.3.3 aiohttp tgcrypto
 
 COPY . .
 
