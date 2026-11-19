@@ -4,7 +4,6 @@ services:
     runtime: docker
     plan: starter
     dockerfilePath: ./Dockerfile
-    dockerContext: .
     envVars:
       - key: API_ID
         sync: false
