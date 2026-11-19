@@ -1,6 +1,7 @@
 import os
 import re
 import asyncio
+from urllib.parse import urlparse
 
 from pyrogram import Client, filters, idle
 from pyrogram.types import (
@@ -66,7 +67,6 @@ def load_channels():
             if line.startswith("#EXTINF"):
 
                 match = re.search(r",(.+)$", line)
-
                 name = match.group(1).strip() if match else None
 
             elif line.startswith(("http://", "https://")):
@@ -80,6 +80,25 @@ def load_channels():
                 name = None
 
     return channels
+
+
+# ==================================
+# STREAM VALIDATION
+# ==================================
+
+def valid_stream(url):
+
+    try:
+        host = urlparse(url).hostname or ""
+
+        # Protected SonyLIV CDN streams are not supported.
+        if host.endswith("slivcdn.com"):
+            return False
+
+        return url.startswith(("http://", "https://"))
+
+    except Exception:
+        return False
 
 
 # ==================================
@@ -132,7 +151,7 @@ async def send_channels(message):
 
         buttons.append([
             InlineKeyboardButton(
-                f"📺 {channel['name']}",
+                f"📺 {channel['name'][:50]}",
                 callback_data=f"play_{index}"
             )
         ])
@@ -145,7 +164,6 @@ async def send_channels(message):
 
 @bot.on_message(filters.command("channels"))
 async def channels_command(client, message):
-
     await send_channels(message)
 
 
@@ -155,11 +173,21 @@ async def channels_command(client, message):
 
 async def play_channel(chat_id, channel):
 
+    url = channel["url"]
+
+    if not valid_stream(url):
+        await bot.send_message(
+            chat_id,
+            "❌ This stream is not supported. "
+            "Use an authorized public stream."
+        )
+        return
+
     try:
 
         await calls.play(
             chat_id,
-            MediaStream(channel["url"])
+            MediaStream(url)
         )
 
         await bot.send_message(
@@ -170,10 +198,12 @@ async def play_channel(chat_id, channel):
 
     except Exception as error:
 
+        print("STREAM ERROR:", repr(error))
+
         await bot.send_message(
             chat_id,
             "❌ STREAM ERROR\n\n"
-            + str(error)[:500]
+            + str(error)[:400]
         )
 
 
@@ -204,13 +234,16 @@ async def callback_handler(client, query):
 
     elif data.startswith("play_"):
 
-        await query.answer()
+        await query.answer("Starting stream...")
 
         try:
 
             index = int(data.replace("play_", ""))
 
             channels = load_channels()
+
+            if index < 0 or index >= len(channels):
+                raise IndexError
 
             channel = channels[index]
 
@@ -254,7 +287,6 @@ async def play_command(client, message):
                 message.chat.id,
                 channel
             )
-
             return
 
     await message.reply_text(
@@ -271,9 +303,7 @@ async def stop_command(client, message):
 
     try:
 
-        await calls.leave_call(
-            message.chat.id
-        )
+        await calls.leave_call(message.chat.id)
 
         await message.reply_text(
             "⏹️ STREAM STOPPED!"
@@ -281,8 +311,10 @@ async def stop_command(client, message):
 
     except Exception as error:
 
+        print("STOP ERROR:", repr(error))
+
         await message.reply_text(
-            f"❌ STOP ERROR: {str(error)[:200]}"
+            "❌ No active stream or call found."
         )
 
 
@@ -294,25 +326,29 @@ async def main():
 
     print("Starting ANSH LIVE TV...")
 
-    await user.start()
+    try:
 
-    print("User session connected!")
+        await user.start()
+        print("User session connected!")
 
-    await calls.start()
+        await calls.start()
+        print("PyTgCalls started!")
 
-    print("PyTgCalls started!")
+        await bot.start()
+        print("ANSH LIVE TV BOT ONLINE!")
 
-    await bot.start()
+        await idle()
 
-    print("ANSH LIVE TV BOT ONLINE!")
+    finally:
 
-    await idle()
+        if bot.is_connected:
+            await bot.stop()
 
-    await bot.stop()
-    await calls.stop()
-    await user.stop()
+        await calls.stop()
+
+        if user.is_connected:
+            await user.stop()
 
 
 if __name__ == "__main__":
-
     asyncio.run(main())
