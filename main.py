@@ -1,7 +1,7 @@
 import os
 import re
 import asyncio
-from urllib.parse import urlparse
+import aiohttp
 
 from pyrogram import Client, filters, idle
 from pyrogram.types import (
@@ -13,21 +13,44 @@ from pytgcalls import PyTgCalls
 from pytgcalls.types import MediaStream
 
 
-# ==================================
+# =====================================
 # CONFIG
-# ==================================
+# =====================================
 
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 SESSION_STRING = os.environ["SESSION_STRING"]
 
-M3U_FILE = "channels.m3u"
+PAGE_SIZE = 10
+
+PLAYLISTS = {
+    "world": {
+        "name": "🌍 All World Channels",
+        "url": "https://iptv-org.github.io/iptv/index.m3u"
+    },
+    "india": {
+        "name": "🇮🇳 India FTA",
+        "url": "https://iptv-org.github.io/iptv/countries/in.m3u"
+    },
+    "hindi": {
+        "name": "🔤 Hindi Channels",
+        "url": "https://iptv-org.github.io/iptv/languages/hin.m3u"
+    },
+    "news": {
+        "name": "📰 World News",
+        "url": "https://iptv-org.github.io/iptv/categories/news.m3u"
+    },
+    "sports": {
+        "name": "🏆 World Sports",
+        "url": "https://iptv-org.github.io/iptv/categories/sports.m3u"
+    }
+}
 
 
-# ==================================
+# =====================================
 # CLIENTS
-# ==================================
+# =====================================
 
 bot = Client(
     "ANSH_LIVE_BOT",
@@ -46,32 +69,58 @@ user = Client(
 calls = PyTgCalls(user)
 
 
-# ==================================
-# M3U LOADER
-# ==================================
+# =====================================
+# DATA CACHE
+# =====================================
 
-def load_channels():
+cache = {}
+active_tasks = {}
 
-    channels = []
-    name = None
 
-    if not os.path.exists(M3U_FILE):
-        return channels
+# =====================================
+# FETCH M3U
+# =====================================
 
-    with open(M3U_FILE, "r", encoding="utf-8") as file:
+async def fetch_playlist(key):
 
-        for line in file:
+    if key in cache:
+        return cache[key]
+
+    url = PLAYLISTS[key]["url"]
+
+    headers = {
+        "User-Agent": "ANSH-LIVE-TV/1.0"
+    }
+
+    timeout = aiohttp.ClientTimeout(total=60)
+
+    try:
+        async with aiohttp.ClientSession(
+            timeout=timeout,
+            headers=headers
+        ) as session:
+
+            async with session.get(url) as response:
+
+                response.raise_for_status()
+                content = await response.text()
+
+        channels = []
+        name = None
+
+        for line in content.splitlines():
 
             line = line.strip()
 
             if line.startswith("#EXTINF"):
 
                 match = re.search(r",(.+)$", line)
-                name = match.group(1).strip() if match else None
+                name = match.group(1).strip() if match else "Unknown"
 
             elif line.startswith(("http://", "https://")):
 
                 if name:
+
                     channels.append({
                         "name": name,
                         "url": line
@@ -79,107 +128,168 @@ def load_channels():
 
                 name = None
 
-    return channels
+        cache[key] = channels
+
+        return channels
+
+    except Exception as error:
+
+        print("PLAYLIST ERROR:", repr(error))
+        return None
 
 
-# ==================================
-# STREAM VALIDATION
-# ==================================
+# =====================================
+# MAIN MENU
+# =====================================
 
-def valid_stream(url):
-
-    try:
-        host = urlparse(url).hostname or ""
-
-        # Protected SonyLIV CDN streams are not supported.
-        if host.endswith("slivcdn.com"):
-            return False
-
-        return url.startswith(("http://", "https://"))
-
-    except Exception:
-        return False
-
-
-# ==================================
-# START
-# ==================================
-
-@bot.on_message(filters.command("start"))
-async def start_command(client, message):
-
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "📺 ALL CHANNELS",
-                callback_data="channels"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "ℹ️ HELP",
-                callback_data="help"
-            )
-        ]
-    ])
-
-    await message.reply_text(
-        "📺 ANSH LIVE TV\n\n"
-        "Welcome to Live TV Bot!\n\n"
-        "Select your option:",
-        reply_markup=keyboard
-    )
-
-
-# ==================================
-# CHANNEL LIST
-# ==================================
-
-async def send_channels(message):
-
-    channels = load_channels()
-
-    if not channels:
-        await message.reply_text(
-            "❌ No channels found in channels.m3u"
-        )
-        return
+def main_keyboard():
 
     buttons = []
 
-    for index, channel in enumerate(channels):
+    for key, item in PLAYLISTS.items():
 
         buttons.append([
             InlineKeyboardButton(
-                f"📺 {channel['name'][:50]}",
-                callback_data=f"play_{index}"
+                item["name"],
+                callback_data=f"cat_{key}_0"
             )
         ])
 
+    buttons.append([
+        InlineKeyboardButton(
+            "ℹ️ HELP",
+            callback_data="help"
+        )
+    ])
+
+    return InlineKeyboardMarkup(buttons)
+
+
+# =====================================
+# SHOW CHANNELS
+# =====================================
+
+async def show_channels(message, key, page=0):
+
+    if key not in PLAYLISTS:
+        return
+
+    channels = await fetch_playlist(key)
+
+    if channels is None:
+
+        await message.reply_text(
+            "❌ Playlist load nahi hui. Thodi der baad try karo."
+        )
+        return
+
+    if not channels:
+
+        await message.reply_text(
+            "❌ Is category mein channels nahi mile."
+        )
+        return
+
+    start = page * PAGE_SIZE
+    end = start + PAGE_SIZE
+
+    selected = channels[start:end]
+
+    buttons = []
+
+    for index, channel in enumerate(selected, start=start):
+
+        buttons.append([
+            InlineKeyboardButton(
+                f"📺 {channel['name'][:45]}",
+                callback_data=f"play_{key}_{index}"
+            )
+        ])
+
+    navigation = []
+
+    if page > 0:
+
+        navigation.append(
+            InlineKeyboardButton(
+                "⬅️ Previous",
+                callback_data=f"cat_{key}_{page-1}"
+            )
+        )
+
+    if end < len(channels):
+
+        navigation.append(
+            InlineKeyboardButton(
+                "Next ➡️",
+                callback_data=f"cat_{key}_{page+1}"
+            )
+        )
+
+    if navigation:
+        buttons.append(navigation)
+
+    buttons.append([
+        InlineKeyboardButton(
+            "🏠 HOME",
+            callback_data="home"
+        )
+    ])
+
     await message.reply_text(
-        "📡 AVAILABLE CHANNELS",
+        f"📡 {PLAYLISTS[key]['name']}\n\n"
+        f"Total channels: {len(channels)}\n"
+        f"Page: {page+1}",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
 
+# =====================================
+# START
+# =====================================
+
+@bot.on_message(filters.command("start"))
+async def start_command(client, message):
+
+    await message.reply_text(
+        "📺 ANSH LIVE TV\n\n"
+        "Welcome!\n"
+        "Select your channel category:",
+        reply_markup=main_keyboard()
+    )
+
+
+# =====================================
+# CHANNELS
+# =====================================
+
 @bot.on_message(filters.command("channels"))
 async def channels_command(client, message):
-    await send_channels(message)
+
+    await message.reply_text(
+        "📡 SELECT CATEGORY:",
+        reply_markup=main_keyboard()
+    )
 
 
-# ==================================
-# PLAY CHANNEL
-# ==================================
+# =====================================
+# PLAY
+# =====================================
 
 async def play_channel(chat_id, channel):
 
     url = channel["url"]
 
-    if not valid_stream(url):
+    # Only HTTP(S) links are accepted.
+    if not url.startswith(("https://", "http://")):
+        await bot.send_message(chat_id, "❌ Invalid stream URL.")
+        return
+
+    # Do not rebroadcast protected SonyLIV CDN streams.
+    if "slivcdn.com" in url.lower():
         await bot.send_message(
             chat_id,
-            "❌ This stream is not supported. "
-            "Use an authorized public stream."
+            "❌ Protected stream not supported."
         )
         return
 
@@ -203,23 +313,27 @@ async def play_channel(chat_id, channel):
         await bot.send_message(
             chat_id,
             "❌ STREAM ERROR\n\n"
-            + str(error)[:400]
+            + str(error)[:300]
         )
 
 
-# ==================================
-# CALLBACK BUTTONS
-# ==================================
+# =====================================
+# CALLBACKS
+# =====================================
 
 @bot.on_callback_query()
 async def callback_handler(client, query):
 
     data = query.data
 
-    if data == "channels":
+    if data == "home":
 
         await query.answer()
-        await send_channels(query.message)
+
+        await query.message.reply_text(
+            "🏠 MAIN MENU",
+            reply_markup=main_keyboard()
+        )
 
     elif data == "help":
 
@@ -227,49 +341,69 @@ async def callback_handler(client, query):
 
         await query.message.reply_text(
             "/start - Start bot\n"
-            "/channels - All channels\n"
-            "/play CHANNEL NAME - Play channel\n"
+            "/channels - Categories\n"
+            "/play CHANNEL NAME - Search channel\n"
             "/stop - Stop stream"
         )
 
-    elif data.startswith("play_"):
+    elif data.startswith("cat_"):
 
-        await query.answer("Starting stream...")
+        await query.answer("Loading...")
 
         try:
 
-            index = int(data.replace("play_", ""))
+            _, key, page = data.split("_")
 
-            channels = load_channels()
+            await show_channels(
+                query.message,
+                key,
+                int(page)
+            )
 
-            if index < 0 or index >= len(channels):
+        except Exception as error:
+
+            print("CATEGORY ERROR:", repr(error))
+
+    elif data.startswith("play_"):
+
+        await query.answer("Starting...")
+
+        try:
+
+            _, key, index = data.split("_")
+
+            channels = await fetch_playlist(key)
+
+            index = int(index)
+
+            if not channels or index >= len(channels):
                 raise IndexError
-
-            channel = channels[index]
 
             await play_channel(
                 query.message.chat.id,
-                channel
+                channels[index]
             )
 
-        except (ValueError, IndexError):
+        except Exception as error:
+
+            print("BUTTON ERROR:", repr(error))
 
             await query.message.reply_text(
-                "❌ Channel not found!"
+                "❌ Channel load nahi hua."
             )
 
 
-# ==================================
-# PLAY COMMAND
-# ==================================
+# =====================================
+# SEARCH COMMAND
+# =====================================
 
 @bot.on_message(filters.command("play"))
-async def play_command(client, message):
+async def search_command(client, message):
 
     if len(message.command) < 2:
 
         await message.reply_text(
-            "Usage:\n/play DD National"
+            "Usage:\n/play channel name"
         )
         return
 
@@ -277,33 +411,44 @@ async def play_command(client, message):
         message.command[1:]
     ).lower()
 
-    channels = load_channels()
+    await message.reply_text(
+        "🔎 Searching channels..."
+    )
 
-    for channel in channels:
+    for key in PLAYLISTS:
 
-        if search in channel["name"].lower():
+        channels = await fetch_playlist(key)
 
-            await play_channel(
-                message.chat.id,
-                channel
-            )
-            return
+        if not channels:
+            continue
+
+        for channel in channels:
+
+            if search in channel["name"].lower():
+
+                await play_channel(
+                    message.chat.id,
+                    channel
+                )
+                return
 
     await message.reply_text(
         "❌ Channel not found!"
     )
 
 
-# ==================================
-# STOP COMMAND
-# ==================================
+# =====================================
+# STOP
+# =====================================
 
 @bot.on_message(filters.command("stop"))
 async def stop_command(client, message):
 
     try:
 
-        await calls.leave_call(message.chat.id)
+        await calls.leave_call(
+            message.chat.id
+        )
 
         await message.reply_text(
             "⏹️ STREAM STOPPED!"
@@ -314,13 +459,13 @@ async def stop_command(client, message):
         print("STOP ERROR:", repr(error))
 
         await message.reply_text(
-            "❌ No active stream or call found."
+            "❌ No active stream found."
         )
 
 
-# ==================================
+# =====================================
 # MAIN
-# ==================================
+# =====================================
 
 async def main():
 
@@ -329,13 +474,13 @@ async def main():
     try:
 
         await user.start()
-        print("User session connected!")
+        print("USER CONNECTED")
 
         await calls.start()
-        print("PyTgCalls started!")
+        print("PYTGCALLS STARTED")
 
         await bot.start()
-        print("ANSH LIVE TV BOT ONLINE!")
+        print("BOT ONLINE")
 
         await idle()
 
@@ -351,4 +496,5 @@ async def main():
 
 
 if __name__ == "__main__":
+
     asyncio.run(main())
