@@ -1,3 +1,4 @@
-pyrogram
+kurigram
 tgcrypto
 py-tgcalls
+flask
