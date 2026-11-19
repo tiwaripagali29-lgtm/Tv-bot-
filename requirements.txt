@@ -1,3 +1,4 @@
-py-tgcalls[pyrogram]==2.3.3
+kurigram
+py-tgcalls==2.3.3
 aiohttp
 tgcrypto
